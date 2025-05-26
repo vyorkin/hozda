@@ -14,8 +14,12 @@ pub struct PrivateKey(#[serde(with = "signkey_serde")] pub SigningKey<Secp256k1>
 
 impl PrivateKey {
     pub fn new_key() -> Self {
-        let signing_key = SigningKey::random(&mut OsRng); // Serialize with `::to_bytes()`
+        let signing_key = SigningKey::random(&mut OsRng);
         PrivateKey(signing_key)
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        PublicKey(*self.0.verifying_key())
     }
 }
 
