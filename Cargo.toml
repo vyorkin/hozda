@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["hz-lib", "hz-miner", "hz-node", "hz-wallet"]
