@@ -4,7 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4.41", features = ["serde"] }
 ciborium = "0.2.2"
+ecdsa = { version = "0.16.9", features = [
+  "signing",
+  "verifying",
+  "serde",
+  "pem",
+] }
+hex = "0.4.3"
+k256 = { version = "0.13.4", features = ["serde", "pem"] }
+# TODO: update rand to 0.9 after ecdsa 0.17.x is released
+rand = { version = "0.8", features = ["getrandom"] }
 serde = { version = "1.0.219", features = ["derive"] }
 sha256 = "1.6.0"
 uint = "0.10.0"

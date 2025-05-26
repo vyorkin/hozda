@@ -1,7 +1,13 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::U256;
+use crate::{
+    U256,
+    crypto::{PublicKey, Signature},
+};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blockchain {
     pub blocks: Vec<Block>,
 }
@@ -16,6 +22,7 @@ impl Blockchain {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
@@ -34,8 +41,9 @@ impl Block {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockHeader {
-    pub timestamp: u64,
+    pub timestamp: DateTime<Utc>,
     pub nonce: u64,
     pub prev_block_hash: [u8; 32],
     pub merkle_root: [u8; 32],
@@ -44,7 +52,7 @@ pub struct BlockHeader {
 
 impl BlockHeader {
     pub fn new(
-        timestamp: u64,
+        timestamp: DateTime<Utc>,
         nonce: u64,
         prev_block_hash: [u8; 32],
         merkle_root: [u8; 32],
@@ -64,6 +72,7 @@ impl BlockHeader {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub inputs: Vec<TransactionInput>,
     pub outputs: Vec<TransactionOutput>,
@@ -79,13 +88,15 @@ impl Transaction {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionInput {
     pub prev_transaction_output_hash: [u8; 32],
-    pub signature: [u8; 64],
+    pub signature: Signature,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionOutput {
     pub value: u64,
     pub unique_id: Uuid,
-    pub pubkey: [u8; 33],
+    pub pubkey: PublicKey,
 }
