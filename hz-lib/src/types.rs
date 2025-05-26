@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::{
     U256,
     crypto::{PublicKey, Signature},
+    error::{self, HzError},
     sha256::Hash,
     util::MerkleRoot,
 };
@@ -19,8 +20,44 @@ impl Blockchain {
         Blockchain { blocks: vec![] }
     }
 
-    pub fn add_block(&mut self, block: Block) {
+    pub fn add_block(&mut self, block: Block) -> error::Result<()> {
+        if self.blocks.is_empty() {
+            // if this is the first block,
+            // check if the block's prev_block_hash is all zeroes
+            if block.header.prev_block_hash != Hash::zero() {
+                println!("zero hash");
+                return Err(HzError::InvalidBlock);
+            }
+        } else {
+            // if this is not the first block, check if the
+            // block's prev_block_hash is the hash of the last block
+            let last_block = self.blocks.last().unwrap();
+            if block.header.prev_block_hash != last_block.hash() {
+                println!("prev hash is wrong");
+                return Err(HzError::InvalidBlock);
+            }
+            // check if the block's hash is less than the target
+            if !block.header.hash().matches_target(block.header.target) {
+                println!("does not match target");
+                return Err(HzError::InvalidBlock);
+            }
+            // check if the block's merkle root is correct
+            let calculated_merkle_root = MerkleRoot::calculate(&block.transactions);
+            if calculated_merkle_root != block.header.merkle_root {
+                println!("invalid merkle root");
+                return Err(HzError::InvalidMerkleRoot);
+            }
+            // check if the block's timestamp is after the last block's timestamp
+            if block.header.timestamp <= last_block.header.timestamp {
+                println!("invalid timestamp");
+                return Err(HzError::InvalidBlock);
+            }
+            // block.verify_transactions(self.block_height(), &self.utxos)?;
+        }
+
         self.blocks.push(block);
+
+        Ok(())
     }
 }
 
