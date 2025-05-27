@@ -10,6 +10,26 @@ construct_uint! {
     pub struct U256(4);
 }
 
+/// Initial miner reward.
+pub const INITIAL_REWARD: u64 = 50;
+
+/// Halving interval in blocks.
+/// After how many blocks we should halve the block reward.
+pub const HALVING_INTERVAL: u64 = 210;
+
+/// Ideal block time in seconds.
+pub const IDEAL_BLOCK_TIME: u64 = 10;
+
+pub const MIN_TARGET: U256 = U256([
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_ffff_ffff,
+    0x0000_ffff_ffff_ffff,
+]);
+
+/// Difficulty update interval in blocks.
+pub const DIFFICULTY_UPDATE_INTERVAL: u64 = 50;
+
 pub mod crypto;
 pub mod error;
 pub mod sha256;

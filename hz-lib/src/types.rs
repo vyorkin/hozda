@@ -1,23 +1,27 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crate::{
-    U256,
+    HALVING_INTERVAL, INITIAL_REWARD, U256,
     crypto::{PublicKey, Signature},
     error::{self, HzError},
     sha256::Hash,
     util::MerkleRoot,
 };
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blockchain {
+    pub utxos: HashMap<Hash, TransactionOutput>,
     pub blocks: Vec<Block>,
 }
 
 impl Blockchain {
     pub fn new() -> Self {
-        Blockchain { blocks: vec![] }
+        Blockchain {
+            utxos: HashMap::new(),
+            blocks: vec![],
+        }
     }
 
     pub fn add_block(&mut self, block: Block) -> error::Result<()> {
@@ -59,6 +63,20 @@ impl Blockchain {
 
         Ok(())
     }
+
+    pub fn rebuild_utxos(&mut self) {
+        for block in &self.blocks {
+            for tx in &block.transactions {
+                // remove the prev_transaction_output_hash, since it is spent
+                for input in &tx.inputs {
+                    self.utxos.remove(&input.prev_transaction_output_hash);
+                }
+                for output in &tx.outputs {
+                    self.utxos.insert(tx.hash(), output.clone());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +95,103 @@ impl Block {
 
     pub fn hash(&self) -> Hash {
         Hash::new(self)
+    }
+
+    pub fn verify_transactions(
+        &self,
+        predicted_block_height: u64,
+        utxos: &HashMap<Hash, TransactionOutput>,
+    ) -> error::Result<()> {
+        let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+
+        // reject empty blocks
+        if self.transactions.is_empty() {
+            return Err(HzError::InvalidTransaction);
+        }
+
+        // the first transaction in a block is special:
+        // it is called "coinbase transaction" in which new bitcoin is minted
+        self.verfiy_coinbase_transaction(predicted_block_height, utxos)?;
+        // excluding the "coinbase transaction" which is verified separately
+        for tx in self.transactions.iter().skip(1) {
+            let mut input_value = 0;
+            let mut output_value = 0;
+
+            for input in &tx.inputs {
+                let prev_output = utxos
+                    .get(&input.prev_transaction_output_hash)
+                    .ok_or(HzError::InvalidTransaction)?;
+                // prevent same-block double-spending
+                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                    return Err(HzError::InvalidTransaction);
+                }
+
+                if !input
+                    .signature
+                    .verify(&input.prev_transaction_output_hash, &prev_output.pubkey)
+                {
+                    return Err(HzError::InvalidSignature);
+                }
+
+                input_value += prev_output.value;
+                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+            for output in &tx.outputs {
+                output_value += output.value;
+            }
+
+            if input_value < output_value {
+                return Err(HzError::InvalidTransaction);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn verfiy_coinbase_transaction(
+        &self,
+        predicted_block_height: u64,
+        utxos: &HashMap<Hash, TransactionOutput>,
+    ) -> error::Result<()> {
+        // coinbase tx is the first transaction in the block
+        let coinbase_tx = &self.transactions[0];
+        if !coinbase_tx.inputs.is_empty() {
+            return Err(HzError::InvalidTransaction);
+        }
+        if coinbase_tx.outputs.is_empty() {
+            return Err(HzError::InvalidTransaction);
+        }
+        let miner_fees = self.calculate_miner_fees(utxos)?;
+        let block_reward = INITIAL_REWARD * 10u64.pow(8)
+            / 2u64.pow((predicted_block_height / HALVING_INTERVAL) as u32);
+
+        let total_coinbase_outputs: u64 = coinbase_tx.outputs.iter().map(|o| o.value).sum();
+        if total_coinbase_outputs != block_reward + miner_fees {
+            return Err(HzError::InvalidTransaction);
+        }
+
+        todo!()
+    }
+
+    fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> error::Result<u64> {
+        let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+        let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+
+        // check every transaction after coinbase transaction
+        for tx in self.transactions.iter().skip(1) {
+            for input in &tx.inputs {
+                let prev_output = utxos
+                    .get(&input.prev_transaction_output_hash)
+                    .ok_or(HzError::InvalidTransaction)?;
+
+                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                    return Err(HzError::InvalidTransaction);
+                }
+                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+        }
+
+        Ok(0)
     }
 }
 
