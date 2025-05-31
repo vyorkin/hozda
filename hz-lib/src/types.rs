@@ -323,6 +323,36 @@ impl BlockHeader {
     pub fn hash(&self) -> Hash {
         Hash::new(self)
     }
+
+    /// Rotates the nonce and if runs out of the nonce, updates the timestamp.
+    /// We only do a finite number of steps at a time because we may want to
+    /// interrupt the mining if we receive an update from the network that
+    /// we should work a new block (bacause the new block has been found in the meantime).
+    pub fn mine(&mut self, steps: usize) -> bool {
+        // The PoW involves scanning for a value that when hashed with SHA-256,
+        // the hash begins with a number of 0-bits.
+        // The avg. work is exponential in the number of 0-bits required.
+
+        // Here we implement PoW by incrementing a nonce in the block until
+        // a value is found that gives the block's hash the required number of 0-bits.
+
+        if self.hash().matches_target(self.target) {
+            return true;
+        }
+        for _ in 0..steps {
+            if let Some(new_nonce) = self.nonce.checked_add(1) {
+                self.nonce = new_nonce;
+            } else {
+                self.nonce = 0;
+                self.timestamp = Utc::now();
+            }
+
+            if self.hash().matches_target(self.target) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
