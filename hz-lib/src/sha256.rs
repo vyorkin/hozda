@@ -30,8 +30,7 @@ impl Hash {
     }
 
     pub fn as_bytes(&self) -> [u8; 32] {
-        let bytes = self.0.to_little_endian();
-        bytes.as_slice().try_into().unwrap()
+        self.0.to_little_endian()
     }
 }
 

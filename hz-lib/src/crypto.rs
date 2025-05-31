@@ -58,7 +58,7 @@ mod signkey_serde {
     where
         D: Deserializer<'de>,
     {
-        let bytes: Vec<u8> = Vec::<u8>::deserialize(deserializer)?;
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
         Ok(SigningKey::from_slice(&bytes).unwrap())
     }
 }

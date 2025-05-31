@@ -20,6 +20,8 @@ pub const HALVING_INTERVAL: u64 = 210;
 /// Ideal block time in seconds.
 pub const IDEAL_BLOCK_TIME: u64 = 10;
 
+/// Requires the first 4 hex digits to be zero.
+/// We use little-endian encoding: the least significant 64 bits are the last.
 pub const MIN_TARGET: U256 = U256([
     0xffff_ffff_ffff_ffff,
     0xffff_ffff_ffff_ffff,
@@ -28,6 +30,7 @@ pub const MIN_TARGET: U256 = U256([
 ]);
 
 /// Difficulty update interval in blocks.
+/// In real bitcoin it is set to 2016.
 pub const DIFFICULTY_UPDATE_INTERVAL: u64 = 50;
 
 pub mod crypto;

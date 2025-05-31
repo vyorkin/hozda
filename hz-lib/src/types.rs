@@ -1,27 +1,38 @@
 use crate::{
-    HALVING_INTERVAL, INITIAL_REWARD, U256,
+    DIFFICULTY_UPDATE_INTERVAL, HALVING_INTERVAL, IDEAL_BLOCK_TIME, INITIAL_REWARD, MIN_TARGET,
+    U256,
     crypto::{PublicKey, Signature},
     error::{self, HzError},
     sha256::Hash,
     util::MerkleRoot,
 };
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blockchain {
     pub utxos: HashMap<Hash, TransactionOutput>,
+    pub target: U256,
     pub blocks: Vec<Block>,
+    #[serde(default, skip_serializing)]
+    mempool: Vec<Transaction>,
 }
 
 impl Blockchain {
     pub fn new() -> Self {
         Blockchain {
             utxos: HashMap::new(),
+            target: MIN_TARGET,
             blocks: vec![],
+            mempool: vec![],
         }
+    }
+
+    pub fn mempool(&self) -> &[Transaction] {
+        &self.mempool
     }
 
     pub fn add_block(&mut self, block: Block) -> error::Result<()> {
@@ -59,9 +70,73 @@ impl Blockchain {
             // block.verify_transactions(self.block_height(), &self.utxos)?;
         }
 
+        // remove block transactions from the mempool
+        let block_transaction_hashes: HashSet<_> =
+            block.transactions.iter().map(|tx| tx.hash()).collect();
+
+        self.mempool
+            .retain(|tx| !block_transaction_hashes.contains(&tx.hash()));
         self.blocks.push(block);
+        self.try_adjust_target();
 
         Ok(())
+    }
+
+    fn try_adjust_target(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        // not enough blocks yet
+        if self.blocks.len() % DIFFICULTY_UPDATE_INTERVAL as usize != 0 {
+            return;
+        }
+
+        // measure the time it took to mine the last DIFFICULTY_UPDATE_INTERVAL blocks
+        let start_time = self.blocks[self.blocks.len() - DIFFICULTY_UPDATE_INTERVAL as usize]
+            .header
+            .timestamp;
+
+        let end_time = self.blocks.last().unwrap().header.timestamp;
+        let time_diff = end_time - start_time;
+        let actual_time_diff_seconds = time_diff.num_seconds();
+
+        // calculate the ideal number of seconds
+        let ideal_time_diff_seconds = IDEAL_BLOCK_TIME * DIFFICULTY_UPDATE_INTERVAL;
+
+        let current_target = BigDecimal::parse_bytes(self.target.to_string().as_bytes(), 10)
+            .expect("Can't parse target: U256 as BigDecimal");
+
+        // new_target = current_target * (actual_time / ideal_time)
+        let new_target = current_target
+            * (BigDecimal::from(actual_time_diff_seconds)
+                / BigDecimal::from(ideal_time_diff_seconds));
+
+        // since U256 and BigDecimal don't know about each other
+        // we need to go through the string representation
+
+        // U256 expects that there will be no decimal point in
+        // the string representation, so we need to cut it off
+        let new_target_str = new_target
+            .to_string()
+            .split('.')
+            .next()
+            .expect("Expected a decimal point")
+            .to_owned();
+
+        let new_target: U256 = U256::from_str_radix(&new_target_str, 10)
+            .expect("Can't parse new_target_str (BigDecimal) as U256");
+
+        // clamp new_target to be within [target / 4, target * 4]
+        // so that we do not increase or decrease the target by more than a factor of 4x
+        let new_target = if new_target < self.target / 4 {
+            self.target / 4
+        } else if new_target > self.target * 4 {
+            self.target * 4
+        } else {
+            new_target
+        };
+        // ensure we do not decrease the target below minimum target
+        self.target = new_target.min(MIN_TARGET);
     }
 
     pub fn rebuild_utxos(&mut self) {
@@ -76,6 +151,12 @@ impl Blockchain {
                 }
             }
         }
+    }
+}
+
+impl Default for Blockchain {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -111,7 +192,7 @@ impl Block {
 
         // the first transaction in a block is special:
         // it is called "coinbase transaction" in which new bitcoin is minted
-        self.verfiy_coinbase_transaction(predicted_block_height, utxos)?;
+        self.verify_coinbase_transaction(predicted_block_height, utxos)?;
         // excluding the "coinbase transaction" which is verified separately
         for tx in self.transactions.iter().skip(1) {
             let mut input_value = 0;
@@ -121,6 +202,7 @@ impl Block {
                 let prev_output = utxos
                     .get(&input.prev_transaction_output_hash)
                     .ok_or(HzError::InvalidTransaction)?;
+
                 // prevent same-block double-spending
                 if inputs.contains_key(&input.prev_transaction_output_hash) {
                     return Err(HzError::InvalidTransaction);
@@ -148,7 +230,7 @@ impl Block {
         Ok(())
     }
 
-    pub fn verfiy_coinbase_transaction(
+    pub fn verify_coinbase_transaction(
         &self,
         predicted_block_height: u64,
         utxos: &HashMap<Hash, TransactionOutput>,
@@ -173,6 +255,7 @@ impl Block {
         todo!()
     }
 
+    /// miner_fees = sum(tx.inputs) - sum(tx.outputs)
     fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> error::Result<u64> {
         let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
         let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
@@ -180,18 +263,34 @@ impl Block {
         // check every transaction after coinbase transaction
         for tx in self.transactions.iter().skip(1) {
             for input in &tx.inputs {
+                // inputs do not contain the values of the outputs,
+                // so we need to match inputs to outputs
+
                 let prev_output = utxos
                     .get(&input.prev_transaction_output_hash)
                     .ok_or(HzError::InvalidTransaction)?;
 
+                // same-block double-spending check (again)
                 if inputs.contains_key(&input.prev_transaction_output_hash) {
                     return Err(HzError::InvalidTransaction);
                 }
+
                 inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+
+            // check for duplicate outputs
+            for output in &tx.outputs {
+                if outputs.contains_key(&output.hash()) {
+                    return Err(HzError::InvalidTransaction);
+                }
+                outputs.insert(output.hash(), output.clone());
             }
         }
 
-        Ok(0)
+        let input_value: u64 = inputs.values().map(|output| output.value).sum();
+        let output_value: u64 = outputs.values().map(|output| output.value).sum();
+
+        Ok(input_value - output_value)
     }
 }
 
@@ -244,14 +343,16 @@ impl Transaction {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionInput {
+    /// The hash of the previous transaction output,
+    /// which is linked into this transaction as input.
     pub prev_transaction_output_hash: Hash,
     pub signature: Signature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionOutput {
-    pub value: u64,
     pub unique_id: Uuid,
+    pub value: u64,
     pub pubkey: PublicKey,
 }
 
