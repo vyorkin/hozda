@@ -12,9 +12,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+/// Unspent transaction output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Utxo {
+    /// Is marked for spending by a transaction in the mempool.
+    pub marked_for_spending: bool,
+    pub output: TransactionOutput,
+}
+
+impl Utxo {
+    pub fn new(output: TransactionOutput) -> Self {
+        Self {
+            marked_for_spending: false,
+            output,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blockchain {
-    utxos: HashMap<Hash, TransactionOutput>,
+    utxos: HashMap<Hash, Utxo>,
     target: U256,
     blocks: Vec<Block>,
     #[serde(default, skip_serializing)]
@@ -31,7 +48,7 @@ impl Blockchain {
         }
     }
 
-    pub fn utxos(&self) -> &HashMap<Hash, TransactionOutput> {
+    pub fn utxos(&self) -> &HashMap<Hash, Utxo> {
         &self.utxos
     }
 
@@ -47,16 +64,36 @@ impl Blockchain {
         &self.mempool
     }
 
+    /// Total number of blocks in blockchain.
     pub fn block_height(&self) -> u64 {
         self.blocks.len() as u64
     }
 
+    // - Track the time when tx was inserted into mempool
+    // - Remove tx if it has been in mempool for too long
+    //
+    // - Mark UTXO's that are referenced by a tx in mempool
+    // - Remove old tx that marks those UTXO's.
+    //
+    // Here is what happens:
+    //
+    // 1. A new tx enters the mempool,
+    //    it wants to spend certain UTXO's (Unspent Transaction Outputs)
+    // 2. We mark these UTXO's as `marked_for_spending`
+    //    indicating that this tx intends to spend them
+    // 3. Conflict detection:
+    //    we check if there's already another tx in the
+    //    mempool trying to spend the same UTXO's
+    // 4. Removing the old tx:
+    //    if such tx is found, the old tx gets removed from the mempool and
+    //    marked_for_spending is set to false for all UTXO's it references
+
     pub fn add_tx_to_mempool(&mut self, tx: Transaction) -> error::Result<()> {
         // we must validate transaction before insertion:
         //
-        // 1. output amounts should be less or equal to input amounts
+        // 1. sum of output amounts should be less or equal to sum of input amounts
         //    (the difference between the two is the miner fee)
-        // 2. all inputs must have a known UTXO
+        // 2. all inputs must have a known/matching UTXO
         // 3. all inputs must be unique
         //    (no double-spending with a single transaction)
 
@@ -64,24 +101,53 @@ impl Blockchain {
 
         // all inputs must match known UTXO's, and must be unique
         for input in &tx.inputs {
-            if !self.utxos.contains_key(&input.prev_transaction_output_hash) {
+            if !self.utxos.contains_key(&input.prev_tx_output_hash) {
                 return Err(HzError::InvalidTransaction);
             }
-            if known_input_hashes.contains(&input.prev_transaction_output_hash) {
+            if known_input_hashes.contains(&input.prev_tx_output_hash) {
                 return Err(HzError::InvalidTransaction);
             }
-            known_input_hashes.insert(input.prev_transaction_output_hash);
+            known_input_hashes.insert(input.prev_tx_output_hash);
+        }
+
+        for input in &tx.inputs {
+            // if there exists another tx in the mempool trying to spend the same UTXO
+            if let Some(Utxo {
+                marked_for_spending: true,
+                ..
+            }) = self.utxos.get(&input.prev_tx_output_hash)
+            {
+                // find the transaction that already references (spends) the UTXO
+                let existing_tx = self.mempool.iter().enumerate().find(|(_, tx)| {
+                    tx.outputs
+                        .iter()
+                        .any(|output| output.hash() == input.prev_tx_output_hash)
+                });
+
+                // if we found it, set marked_for_spending = false
+                // for all UTXO's it references
+                if let Some((idx, existing_tx)) = existing_tx {
+                    for input in &existing_tx.inputs {
+                        // OK, THATS ENOUGH.
+                        // I must say I'm disappointed with this book.
+                        // The absence of tests makes it difficult to validate the functionality.
+                        // I'm discontinuing this study as it appears to be an inefficient allocation of my time.
+                        // IN OTHER WORDS:
+                        // Fuck it.
+                    }
+                }
+            }
         }
 
         // all inputs must be lower than all outputs
-
         let all_inputs = tx
             .inputs
             .iter()
             .map(|input| {
                 self.utxos
-                    .get(&input.prev_transaction_output_hash)
+                    .get(&input.prev_tx_output_hash)
                     .expect("No matching UTXO for tx input")
+                    .output
                     .value
             })
             .sum::<u64>();
@@ -101,8 +167,9 @@ impl Blockchain {
                 .iter()
                 .map(|input| {
                     self.utxos
-                        .get(&input.prev_transaction_output_hash)
+                        .get(&input.prev_tx_output_hash)
                         .expect("No matching UTXO for tx input")
+                        .output
                         .value
                 })
                 .sum::<u64>();
@@ -222,10 +289,12 @@ impl Blockchain {
             for tx in &block.transactions {
                 // remove the prev_transaction_output_hash, since it is spent
                 for input in &tx.inputs {
-                    self.utxos.remove(&input.prev_transaction_output_hash);
+                    self.utxos.remove(&input.prev_tx_output_hash);
                 }
                 for output in &tx.outputs {
-                    self.utxos.insert(tx.hash(), output.clone());
+                    let tx_output_hash = tx.hash();
+                    let utxo = Utxo::new(output.clone());
+                    self.utxos.insert(tx_output_hash, utxo);
                 }
             }
         }
@@ -259,7 +328,7 @@ impl Block {
     pub fn verify_transactions(
         &self,
         predicted_block_height: u64,
-        utxos: &HashMap<Hash, TransactionOutput>,
+        utxos: &HashMap<Hash, Utxo>,
     ) -> error::Result<()> {
         let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
 
@@ -277,24 +346,24 @@ impl Block {
             let mut output_value = 0;
 
             for input in &tx.inputs {
-                let prev_output = utxos
-                    .get(&input.prev_transaction_output_hash)
+                let utxo = utxos
+                    .get(&input.prev_tx_output_hash)
                     .ok_or(HzError::InvalidTransaction)?;
 
                 // prevent same-block double-spending
-                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                if inputs.contains_key(&input.prev_tx_output_hash) {
                     return Err(HzError::InvalidTransaction);
                 }
 
                 if !input
                     .signature
-                    .verify(&input.prev_transaction_output_hash, &prev_output.pubkey)
+                    .verify(&input.prev_tx_output_hash, &utxo.output.pubkey)
                 {
                     return Err(HzError::InvalidSignature);
                 }
 
-                input_value += prev_output.value;
-                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+                input_value += utxo.output.value;
+                inputs.insert(input.prev_tx_output_hash, utxo.output.clone());
             }
             for output in &tx.outputs {
                 output_value += output.value;
@@ -311,7 +380,7 @@ impl Block {
     pub fn verify_coinbase_transaction(
         &self,
         predicted_block_height: u64,
-        utxos: &HashMap<Hash, TransactionOutput>,
+        utxos: &HashMap<Hash, Utxo>,
     ) -> error::Result<()> {
         // coinbase tx is the first transaction in the block
         let coinbase_tx = &self.transactions[0];
@@ -334,7 +403,7 @@ impl Block {
     }
 
     /// miner_fees = sum(tx.inputs) - sum(tx.outputs)
-    fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> error::Result<u64> {
+    fn calculate_miner_fees(&self, utxos: &HashMap<Hash, Utxo>) -> error::Result<u64> {
         let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
         let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
 
@@ -344,16 +413,16 @@ impl Block {
                 // inputs do not contain the values of the outputs,
                 // so we need to match inputs to outputs
 
-                let prev_output = utxos
-                    .get(&input.prev_transaction_output_hash)
+                let utxo = utxos
+                    .get(&input.prev_tx_output_hash)
                     .ok_or(HzError::InvalidTransaction)?;
 
                 // same-block double-spending check (again)
-                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                if inputs.contains_key(&input.prev_tx_output_hash) {
                     return Err(HzError::InvalidTransaction);
                 }
 
-                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+                inputs.insert(input.prev_tx_output_hash, utxo.output.clone());
             }
 
             // check for duplicate outputs
@@ -452,8 +521,8 @@ impl Transaction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionInput {
     /// The hash of the previous transaction output,
-    /// which is linked into this transaction as input.
-    pub prev_transaction_output_hash: Hash,
+    /// which is linked into this transaction input.
+    pub prev_tx_output_hash: Hash,
     pub signature: Signature,
 }
 
