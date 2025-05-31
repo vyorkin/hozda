@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Blockchain {
-    pub utxos: HashMap<Hash, TransactionOutput>,
-    pub target: U256,
-    pub blocks: Vec<Block>,
+    utxos: HashMap<Hash, TransactionOutput>,
+    target: U256,
+    blocks: Vec<Block>,
     #[serde(default, skip_serializing)]
     mempool: Vec<Transaction>,
 }
@@ -31,8 +31,86 @@ impl Blockchain {
         }
     }
 
+    pub fn utxos(&self) -> &HashMap<Hash, TransactionOutput> {
+        &self.utxos
+    }
+
+    pub fn target(&self) -> U256 {
+        self.target
+    }
+
+    pub fn blocks(&self) -> impl Iterator<Item = &Block> {
+        self.blocks.iter()
+    }
+
     pub fn mempool(&self) -> &[Transaction] {
         &self.mempool
+    }
+
+    pub fn block_height(&self) -> u64 {
+        self.blocks.len() as u64
+    }
+
+    pub fn add_tx_to_mempool(&mut self, tx: Transaction) -> error::Result<()> {
+        // we must validate transaction before insertion:
+        //
+        // 1. output amounts should be less or equal to input amounts
+        //    (the difference between the two is the miner fee)
+        // 2. all inputs must have a known UTXO
+        // 3. all inputs must be unique
+        //    (no double-spending with a single transaction)
+
+        let mut known_input_hashes = HashSet::new();
+
+        // all inputs must match known UTXO's, and must be unique
+        for input in &tx.inputs {
+            if !self.utxos.contains_key(&input.prev_transaction_output_hash) {
+                return Err(HzError::InvalidTransaction);
+            }
+            if known_input_hashes.contains(&input.prev_transaction_output_hash) {
+                return Err(HzError::InvalidTransaction);
+            }
+            known_input_hashes.insert(input.prev_transaction_output_hash);
+        }
+
+        // all inputs must be lower than all outputs
+
+        let all_inputs = tx
+            .inputs
+            .iter()
+            .map(|input| {
+                self.utxos
+                    .get(&input.prev_transaction_output_hash)
+                    .expect("No matching UTXO for tx input")
+                    .value
+            })
+            .sum::<u64>();
+        let all_outputs = tx.outputs.iter().map(|output| output.value).sum::<u64>();
+
+        if all_inputs < all_outputs {
+            return Err(HzError::InvalidTransaction);
+        }
+
+        self.mempool.push(tx);
+
+        // miners are incentivized to assemble blocks from transactions that
+        // have the highest fees first, so we want pre-sort tx's by fee size
+        self.mempool.sort_by_key(|tx| {
+            let all_inputs = tx
+                .inputs
+                .iter()
+                .map(|input| {
+                    self.utxos
+                        .get(&input.prev_transaction_output_hash)
+                        .expect("No matching UTXO for tx input")
+                        .value
+                })
+                .sum::<u64>();
+            let all_outputs = tx.outputs.iter().map(|output| output.value).sum::<u64>();
+            all_inputs - all_outputs
+        });
+
+        Ok(())
     }
 
     pub fn add_block(&mut self, block: Block) -> error::Result<()> {
@@ -67,7 +145,7 @@ impl Blockchain {
                 println!("invalid timestamp");
                 return Err(HzError::InvalidBlock);
             }
-            // block.verify_transactions(self.block_height(), &self.utxos)?;
+            block.verify_transactions(self.block_height(), &self.utxos)?;
         }
 
         // remove block transactions from the mempool
@@ -287,7 +365,7 @@ impl Block {
             }
         }
 
-        let input_value: u64 = inputs.values().map(|output| output.value).sum();
+        let input_value: u64 = inputs.values().map(|input| input.value).sum();
         let output_value: u64 = outputs.values().map(|output| output.value).sum();
 
         Ok(input_value - output_value)
